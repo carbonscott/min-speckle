@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class SemiHardSelector:
+class OfflineSemiHardSelector:
 
     def __init__(self, model = None, alpha = 0.02):
         self.model = model
@@ -193,8 +193,113 @@ class SemiHardSelector:
         num_sample_in_mini_batch, num_candidate, size_c, size_y, size_x = batch_candidate_list.shape
 
         batch_candidate_flat_list = batch_candidate_list.view(num_sample_in_mini_batch * num_candidate, size_c, size_y, size_x)
-        batch_a = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_a for (idx_encode, idx_a), _, _ in triplet_list ] ] 
-        batch_p = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_p for _, (idx_encode, idx_p), _ in triplet_list ] ] 
-        batch_n = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_n for _, _, (idx_encode, idx_n) in triplet_list ] ] 
+        batch_a = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_a for (idx_encode, idx_a), _, _ in triplet_list ] ]
+        batch_p = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_p for _, (idx_encode, idx_p), _ in triplet_list ] ]
+        batch_n = batch_candidate_flat_list[ [ idx_encode * num_candidate + idx_n for _, _, (idx_encode, idx_n) in triplet_list ] ]
+
+        return batch_a, batch_p, batch_n
+
+
+
+
+class OnlineSemiHardSelector:
+
+    def __init__(self, model = None, alpha = 0.02):
+        self.model = model
+        self.alpha = alpha
+
+
+    def __call__(self, batch_imgs, batch_labels, batch_metadata, logs_triplets = True, **kwargs):
+        ''' Only supply batch_size of image triplet for training.  This is in
+            contrast to the all positive method.  Each image in the batch has
+            the chance of playing an anchor.  Negative mining is applied.  
+        '''
+        # Retrieve the batch size...
+        batch_size = batch_imgs.shape[0]
+
+        # Encode all batched images without autograd tracking...
+        with torch.no_grad():
+            batch_embs = self.model(batch_imgs)
+
+        # Convert batch labels to dictionary for fast lookup...
+        batch_label_dict = {}
+        batch_label_list = batch_labels.cpu().numpy()
+        for i, v in enumerate(batch_label_list):
+            if not v in batch_label_dict: batch_label_dict[v] = [i]
+            else                        : batch_label_dict[v].append(i)
+
+        # ___/ NEGATIVE MINIG \___
+        # Go through each image in the batch and form triplets...
+        # Prepare for logging
+        triplets = []
+        dist_log = []
+        for batch_idx_achr, img in enumerate(batch_imgs):
+            # Get the label of the image...
+            batch_label_achr = batch_label_list[batch_idx_achr]
+
+            # Create a bucket of positive cases...
+            batch_idx_pos_list = batch_label_dict[batch_label_achr]
+
+            # Select a positive case from positive bucket...
+            batch_idx_pos = random.choice(batch_idx_pos_list)
+
+            # Find positive embedding squared distances..
+            emb_achr = batch_embs[batch_idx_achr]
+            emb_pos  = batch_embs[batch_idx_pos]
+            delta_emb_pos = emb_achr - emb_pos
+            dist_pos = torch.sum(delta_emb_pos * delta_emb_pos)
+
+            # Create a bucket of negative cases...
+            idx_neg_list = []
+            for batch_label, idx_list in batch_label_dict.items():
+                if batch_label == batch_label_achr: continue
+                idx_neg_list += idx_list
+            idx_neg_list = torch.tensor(idx_neg_list)
+
+            # Collect all negative embeddings...
+            emb_neg_list = batch_embs[idx_neg_list]
+
+            # Find negative embedding squared distances...
+            delta_emb_neg_list = emb_achr[None, :] - emb_neg_list
+            dist_neg_list = torch.sum( delta_emb_neg_list * delta_emb_neg_list, dim = -1 )
+
+            # Find negative squared distance satisfying dist_neg > dist_pos (semi hard)...
+            # logical_and is only supported when pytorch version >= 1.5
+            cond_semihard = (dist_pos < dist_neg_list) * (dist_neg_list < dist_pos + self.alpha)
+
+            # If semi hard exists???
+            if torch.any(cond_semihard):
+                # Select one random example that is semi hard...
+                size_semihard = torch.sum(cond_semihard)
+                idx_random_semihard = random.choice(range(size_semihard))
+
+                # Fetch the batch index of the example and its distance w.r.t the anchor...
+                batch_idx_neg = idx_neg_list [cond_semihard][idx_random_semihard]
+                dist_neg      = dist_neg_list[cond_semihard][idx_random_semihard]
+
+            # Otherwise, randomly select one negative example???
+            else:
+                idx_reduced   = random.choice(range(len(idx_neg_list)))
+                batch_idx_neg = idx_neg_list[idx_reduced]
+                dist_neg      = dist_neg_list[idx_reduced]
+
+            # Track triplet...
+            triplets.append((batch_idx_achr, batch_idx_pos, batch_idx_neg.tolist()))
+            dist_log.append((dist_pos, dist_neg))
+
+        if logs_triplets:
+            # Logging all cases...
+            for idx, triplet in enumerate(triplets):
+                batch_idx_achr, batch_idx_pos, batch_idx_neg = triplet
+                metadata_achr = batch_metadata[batch_idx_achr]
+                metadata_pos  = batch_metadata[batch_idx_pos]
+                metadata_neg  = batch_metadata[batch_idx_neg]
+                dist_pos   = dist_log[idx][0]
+                dist_neg   = dist_log[idx][1]
+                logger.info(f"DATA - {metadata_achr} {metadata_pos} {metadata_neg} {dist_pos:12.6f} {dist_neg:12.6f}")
+
+        batch_a = batch_imgs[ [ triplet[0] for triplet in triplets ] ]
+        batch_p = batch_imgs[ [ triplet[1] for triplet in triplets ] ]
+        batch_n = batch_imgs[ [ triplet[2] for triplet in triplets ] ]
 
         return batch_a, batch_p, batch_n
