@@ -377,10 +377,10 @@ def load_checkpoint(model, optimizer, scheduler, path):
 
 
 
-def remove_module_from_state_dict(state_dict):
+def remove_module_from_state_dict(state_dict, prefix = "module."):
     new_state_dict = {}
     for key, value in state_dict.items():
-        new_key = key.replace("module.", "")  # Remove the "module." prefix
+        new_key = key.replace(prefix, "")  # Remove the "module." prefix
         new_state_dict[new_key] = value
     return new_state_dict
 
