@@ -18,7 +18,7 @@ from min_speckle.datasets.SPI      import TripletCandidate
 from min_speckle.model             import SpeckleEmbedding
 from min_speckle.criterion         import TripletLoss
 from min_speckle.utils             import init_logger, MetaLog, split_dataset, save_checkpoint, load_checkpoint, set_seed, init_weights
-from min_speckle.semihard_selector import SemiHardSelector
+from min_speckle.semihard_selector import OfflineSemiHardSelector
 
 from min_speckle.trans import RandomShift,          \
                               RandomRotate,         \
@@ -122,6 +122,7 @@ crop_center                  = (86, 86)
 crop_window_size             = (48, 48)
 path_brightness_distribution = "image_distribution_by_photon_count.npy"
 sigma                        = 0.15
+trim_factor_max              = 0.2
 
 trans_list = (
     RandomBrightness(path_brightness_distribution),
@@ -131,6 +132,7 @@ trans_list = (
     RandomRotate(angle_max = angle_max, order = 0), 
     RandomShift(frac_shift_max, frac_shift_max),
     RandomPatch(num_patch = num_patch, size_patch_y = size_patch, size_patch_x = size_patch, var_patch_y = 0.2, var_patch_x = 0.2),
+    RandomCenterCropZoom(trim_factor_max),
     ## Binning(block_size = 4, mask = None),
 )
 
