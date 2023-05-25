@@ -238,3 +238,267 @@ class TripletCandidate(Dataset):
             dataset_cache_dict[idx] = (encode, img_nplist, metadata_list)
 
         return dataset_cache_dict
+
+
+
+
+class DataSampler(Dataset):
+    """
+    For online learning.
+    dataset_list element:
+        (img, label, metadata_tuple)
+    """
+
+    def __init__(self, dataset_list, 
+                       num_sample, 
+                       num_sample_per_label = None, 
+                       trans_list            = None, 
+                       normalizes_img        = True,
+                       prints_cache_state    = True,
+                       allows_cache_trans    = False,
+                       seed                  = None, 
+                       joins_metadata        = True,
+                       mpi_comm              = None,):
+        # Unpack parameters...
+        self.num_sample           = num_sample
+        self.num_sample_per_label = num_sample_per_label
+        self.dataset_list          = dataset_list
+        self.normalizes_img        = normalizes_img
+        self.prints_cache_state    = prints_cache_state
+        self.trans_list            = trans_list
+        self.allows_cache_trans    = allows_cache_trans
+        self.joins_metadata        = joins_metadata
+        self.seed                  = seed
+        self.mpi_comm              = mpi_comm
+
+        # Set up mpi...
+        if self.mpi_comm is not None:
+            self.mpi_size     = self.mpi_comm.Get_size()    # num of processors
+            self.mpi_rank     = self.mpi_comm.Get_rank()
+            self.mpi_data_tag = 11
+
+        # Set seed for data spliting...
+        if seed is not None:
+            set_seed(seed)
+
+        self.random_state_cache_dict = {}
+        self.dataset_cache_dict = {}
+
+        # Fetch all metadata...
+        self.metadata_list = [ metadata for _, _, metadata in self.dataset_list ]
+        self.label_list    = [ label for _, label, _ in self.dataset_list ]
+
+        # Create a lookup table for locating the sequence number (seqi) based on a label...
+        label_seqi_dict = {}
+        for seqi, (_, label, _) in enumerate(self.dataset_list):
+            # Keep track of label and its seqi
+            if not label in label_seqi_dict: label_seqi_dict[label] = [seqi]
+            else                           : label_seqi_dict[label].append(seqi)
+        self.label_seqi_dict = label_seqi_dict
+
+        # Get unique labels...
+        self.labels = sorted(list(set([ label for _, label, _ in self.dataset_list ])))
+
+        # Form triplet for ML training...
+        self.online_set = self._form_online_set()
+
+        return None
+
+
+    def __len__(self):
+        return self.num_sample
+
+
+    def get_random_state(self):
+        state_random = (random.getstate(), np.random.get_state())
+
+        return state_random
+
+
+    def set_random_state(self, state_random):
+        state_random, state_numpy = state_random
+        random.setstate(state_random)
+        np.random.set_state(state_numpy)
+
+        return None
+
+
+    def cache_dataset(self, idx_list = []):
+        if not len(idx_list): idx_list = range(self.num_sample)
+        for idx in idx_list:
+            if idx in self.dataset_cache_dict: continue
+
+            if self.prints_cache_state:
+                print(f"Cacheing data point {idx}...")
+
+            img, label, metadata = self.get_data(idx)
+            self.dataset_cache_dict[idx] = (img, label, metadata)
+
+        return None
+
+
+    def mpi_cache_dataset(self):
+        ''' Cache image in the seq_random_list unless a subset is specified
+            using MPI.
+        '''
+        # Import chunking method...
+        from ..utils import split_list_into_chunk
+
+        # Get the MPI metadata...
+        mpi_comm     = self.mpi_comm
+        mpi_size     = self.mpi_size
+        mpi_rank     = self.mpi_rank
+        mpi_data_tag = self.mpi_data_tag
+
+        # If subset is not give, then go through the whole set...
+        idx_list = range(self.num_sample)
+
+        # Split the workload...
+        idx_list_in_chunk = split_list_into_chunk(idx_list, max_num_chunk = mpi_size)
+
+        # Process chunk by each worker...
+        # No need to sync the dataset_cache_dict across workers
+        if mpi_rank != 0:
+            if mpi_rank < len(idx_list_in_chunk):
+                idx_list_per_worker = idx_list_in_chunk[mpi_rank]
+                self.dataset_cache_dict = self._mpi_cache_data_per_rank(idx_list_per_worker)
+
+            mpi_comm.send(self.dataset_cache_dict, dest = 0, tag = mpi_data_tag)
+
+        if mpi_rank == 0:
+            idx_list_per_worker = idx_list_in_chunk[mpi_rank]
+            self.dataset_cache_dict = self._mpi_cache_data_per_rank(idx_list_per_worker)
+
+            for i in range(1, mpi_size, 1):
+                dataset_cache_dict = mpi_comm.recv(source = i, tag = mpi_data_tag)
+
+                self.dataset_cache_dict.update(dataset_cache_dict)
+
+        return None
+
+
+    def _mpi_cache_data_per_rank(self, idx_list):
+        ''' Cache image in the seq_random_list unless a subset is specified
+            using MPI.
+        '''
+        dataset_cache_dict = {}
+        for idx in idx_list:
+            # Skip those have been recorded...
+            if idx in dataset_cache_dict: continue
+
+            print(f"Cacheing data point {idx}...")
+
+            img, label, metadata = self.get_data(idx)
+            dataset_cache_dict[idx] = (img, label, metadata)
+
+        return dataset_cache_dict
+
+
+    def get_data(self, idx):
+        '''
+        Acutallay access the source data and apply the tranformation.
+        '''
+
+        # Retrive a sampled image...
+        idx_sample = self.online_set[idx]
+        img, label, metadata = self.dataset_list[idx_sample]
+        img = img[None,]
+
+        # Apply any possible transformation...
+        # How to define a custom transform function?
+        # Input : img, **kwargs 
+        # Output: img_transfromed
+        if self.trans_list is not None:
+            if self.allows_cache_trans:
+                # Memorize the random state by index
+                if idx not in self.random_state_cache_dict:
+                    state_random = self.get_random_state()
+                    self.random_state_cache_dict[idx] = state_random
+                state_random = self.random_state_cache_dict[idx]
+                self.set_random_state(state_random)
+
+            for trans in self.trans_list:
+                img = trans(img)
+
+        return img, label, metadata
+
+
+    def __getitem__(self, idx):
+        # Lazy load a cached image if it exists...
+        img, label, metadata = self.dataset_cache_dict[idx] if idx in self.dataset_cache_dict \
+                                                            else self.get_data(idx)
+
+        if self.normalizes_img:
+            # Normalize input image...
+            img_mean = np.mean(img)
+            img_std  = np.std(img)
+            img      = (img - img_mean) / img_std
+
+        if self.joins_metadata: metadata = ' '.join(metadata)
+
+        ## return img[None,], label, metadata
+        return img, label, metadata
+
+
+    def _form_online_set(self):
+        """ 
+        Creating `num_sample` simple set that consists of one image only. 
+        """
+        # Select two list of random labels following uniform distribution...
+        # For a single image
+        num_sample = self.num_sample
+        label_online_list  = random.choices(self.labels, k = num_sample)
+
+        # Limit unique samples per class...
+        label_seqi_dict = self.label_seqi_dict
+        label_seqi_sampled_dict = {}
+        if self.num_sample_per_label is not None:
+            for label in self.labels:
+                # Fetch a bucket of images...
+                bucket = label_seqi_dict[label]
+
+                # Randomly sample certain number of unique examples per class...
+                num_sample = min(self.num_sample_per_label, len(bucket))
+                id_list = random.sample(bucket, num_sample)
+
+                label_seqi_sampled_dict[label] = id_list
+
+            label_seqi_dict = label_seqi_sampled_dict
+
+        self.label_seqi_dict = label_seqi_dict
+
+        # Form a simple set...
+        online_set = []
+        for label in label_online_list:
+            # Fetch a bucket of images...
+            bucket = label_seqi_dict[label]
+
+            # Randomly sample one...
+            id = random.choice(bucket)
+
+            online_set.append(id)
+
+        return online_set
+
+
+    def report(self):
+        # Log the number of images for each label...
+        logger.info("___/ List of entries in dataset \___")
+
+        event_label_dict = {}
+        for idx in self.online_set:
+            label = self.label_list[idx]
+
+            if not label in event_label_dict: event_label_dict[label] = [ idx ]
+            else                            : event_label_dict[label].append(idx)
+
+        for label, idx_list in event_label_dict.items():
+            count = len(idx_list)
+            logger.info(f"KV - (event count) label {label} : {count}")
+
+        for label, idx_list in event_label_dict.items():
+            count = len(set(idx_list))
+            logger.info(f"KV - (unique event count) label {label} : {count}")
+
+
+
