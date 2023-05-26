@@ -39,6 +39,10 @@ torch.autograd.set_detect_anomaly(True)
 
 logger = logging.getLogger(__name__)
 
+# Set global seed...
+seed = 0
+set_seed(seed)
+
 # [[[ USER INPUT ]]]
 timestamp_prev = None # "2023_0505_1249_26"
 epoch          = None # 21
@@ -60,7 +64,6 @@ num_sample_validate           = 10000
 frac_train    = 0.5
 frac_validate = 0.5
 
-uses_skip_connection = True    # Default: True
 uses_mixed_precision = True
 
 alpha        = 2e-2
@@ -68,9 +71,8 @@ lr           = 10**(-3.0)
 weight_decay = 1e-4
 
 num_gpu     = 1
-size_batch  = 20 * num_gpu
+size_batch  = 40 * num_gpu
 num_workers = 4  * num_gpu    # mutiple of size_sample // size_batch
-seed        = 0
 
 mpi_batch_size = 20
 
@@ -112,11 +114,8 @@ if mpi_rank == 0:
 # Load raw data...
 with open(path_dataset, 'rb') as fh:
     dataset_list = pickle.load(fh)
-data_train   , data_val_and_test = split_dataset(dataset_list     , frac_train   , seed = seed)
-data_validate, data_test         = split_dataset(data_val_and_test, frac_validate, seed = seed)
-
-# Set global seed...
-set_seed(seed)
+data_train   , data_val_and_test = split_dataset(dataset_list     , frac_train   , seed = None)
+data_validate, data_test         = split_dataset(data_val_and_test, frac_validate, seed = None)
 
 # Set up transformation rules
 num_patch                    = 10
@@ -124,7 +123,7 @@ size_patch                   = 10
 frac_shift_max               = 0.2
 angle_max                    = 360
 crop_center                  = (86, 86)
-crop_window_size             = (48, 48)
+crop_window_size             = (48*2, 48*2)
 path_brightness_distribution = "image_distribution_by_photon_count.npy"
 sigma                        = 0.15
 trim_factor_max              = 0.2
@@ -204,7 +203,7 @@ if mpi_rank == 0:
     model.to(device)
 
     # Initialize semi hard example selector...
-    semihard_selector = SemiHardSelector(model = model)
+    semihard_selector = OfflineSemiHardSelector(model = model)
 
 
     # [[[ CRITERION ]]]
@@ -216,8 +215,8 @@ if mpi_rank == 0:
                             lr = lr,
                             weight_decay = weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode           = 'min',
-                                             factor         = 2e-1,
-                                             patience       = 10,
+                                             factor         = 5e-1,
+                                             patience       = 20,
                                              threshold      = 1e-4,
                                              threshold_mode ='rel',
                                              verbose        = True)
@@ -367,7 +366,7 @@ if mpi_rank == 0:
 
         # Report the learning rate used in the last optimization...
         lr_used = optimizer.param_groups[0]['lr']
-        logger.info(f"MSG (device:{device}) - epoch {epoch}, lr used = {lr_used}")
+        logger.info(f"MSG (device:{device}) - epoch {epoch} (lr used = {lr_used})")
 
         # Update learning rate in the scheduler...
         scheduler.step(validate_loss_mean)

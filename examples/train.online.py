@@ -31,6 +31,10 @@ from min_speckle.trans import RandomShift,          \
                               Binning,              \
                               Crop
 
+# Set global seed...
+seed = 0
+set_seed(seed)
+
 torch.autograd.set_detect_anomaly(True)
 
 mpi_comm = None
@@ -62,12 +66,11 @@ uses_mixed_precision = True
 
 alpha        = 0.05565119
 lr           = 10**(-3.0)
-weight_decay = 1e-4
+weight_decay = 1e-5
 
 num_gpu     = 1
-size_batch  = 20 * num_gpu
+size_batch  = 40 * num_gpu
 num_workers = 2  * num_gpu    # mutiple of size_sample // size_batch
-seed        = 0
 
 # Clarify the purpose of this experiment...
 hostname = socket.gethostname()
@@ -106,11 +109,8 @@ metalog.report()
 # Load raw data...
 with open(path_dataset, 'rb') as fh:
     dataset_list = pickle.load(fh)
-data_train   , data_val_and_test = split_dataset(dataset_list     , frac_train   , seed = seed)
-data_validate, data_test         = split_dataset(data_val_and_test, frac_validate, seed = seed)
-
-# Set global seed...
-set_seed(seed)
+data_train   , data_val_and_test = split_dataset(dataset_list     , frac_train   , seed = None)
+data_validate, data_test         = split_dataset(data_val_and_test, frac_validate, seed = None)
 
 # Set up transformation rules
 num_patch                    = 10
@@ -133,11 +133,12 @@ trans_list = (
 )
 
 # Define the training set
-dataset_train = DataSampler( dataset_list         = data_train, 
+dataset_train = DataSampler( dataset_list         = data_train,
                              num_sample           = num_sample_train,
-                             num_sample_per_label = num_sample_per_label_train, 
+                             num_sample_per_label = num_sample_per_label_train,
                              mpi_comm             = mpi_comm,
                              trans_list           = trans_list, )
+dataset_train.report()
 dataloader_train = torch.utils.data.DataLoader( dataset_train,
                                                 shuffle     = False,
                                                 pin_memory  = True,
@@ -145,11 +146,12 @@ dataloader_train = torch.utils.data.DataLoader( dataset_train,
                                                 num_workers = num_workers, )
 
 # Define validation set...
-dataset_validate = DataSampler( dataset_list         = data_validate, 
+dataset_validate = DataSampler( dataset_list         = data_validate,
                                 num_sample           = num_sample_validate,
-                                num_sample_per_label = num_sample_per_label_validate, 
+                                num_sample_per_label = num_sample_per_label_validate,
                                 mpi_comm             = mpi_comm,
                                 trans_list           = trans_list, )
+dataset_validate.report()
 dataloader_validate = torch.utils.data.DataLoader( dataset_validate,
                                                    shuffle     = False,
                                                    pin_memory  = True,
@@ -197,8 +199,8 @@ optimizer = optim.AdamW(param_iter,
                         lr = lr,
                         weight_decay = weight_decay)
 scheduler = ReduceLROnPlateau(optimizer, mode           = 'min',
-                                         factor         = 2e-1,
-                                         patience       = 10,
+                                         factor         = 5e-1,
+                                         patience       = 20,
                                          threshold      = 1e-4,
                                          threshold_mode ='rel',
                                          verbose        = True)
@@ -218,11 +220,18 @@ if path_chkpt_prev is not None:
 
 print(f"Current timestamp: {timestamp}")
 
+is_init = True
 for epoch in tqdm.tqdm(range(max_epochs)):
     epoch += epoch_min
 
     # Uses mixed precision???
     if uses_mixed_precision: scaler = torch.cuda.amp.GradScaler()
+
+    # Only log the first pass...
+    logs_triplets = False
+    if is_init:
+        logs_triplets = True
+        is_init = False
 
     # ___/ TRAIN \___
     # Turn on training related components in the model...
@@ -243,7 +252,7 @@ for epoch in tqdm.tqdm(range(max_epochs)):
         batch_a, batch_p, batch_n = semihard_selector(batch_imgs,
                                                       batch_labels,
                                                       batch_metadata,
-                                                      logs_triplets = False)
+                                                      logs_triplets = logs_triplets)
 
         # Forward, backward and update...
         if uses_mixed_precision:
@@ -294,21 +303,15 @@ for epoch in tqdm.tqdm(range(max_epochs)):
         # Unpack the batch entry and move them to device...
         batch_imgs, batch_labels, batch_metadata = batch_entry
 
-        # Transpose the first two dims in batch_metadata...
-        # CAUSE: The metadata have a transposed dimension compared with batch_labels
-        # [GOOD TO KNOW] It can be avoided by writing a custom collate_fn function
-        # https://stackoverflow.com/questions/65279115/how-to-use-collate-fn-with-dataloaders
-        batch_metadata = list(map(list, zip(*batch_metadata)))
-
         # Move data to device...
-        batch_imgs = batch_imgs.to(device, dtype = torch.float)
-        batch_labels    = batch_labels.to(device, dtype = torch.float)
+        batch_imgs   = batch_imgs.to(device, dtype = torch.float)
+        batch_labels = batch_labels.to(device, dtype = torch.float)
 
         # Select semi hard examples from candidates...
         batch_a, batch_p, batch_n = semihard_selector(batch_imgs,
                                                       batch_labels,
                                                       batch_metadata,
-                                                      logs_triplets = False)
+                                                      logs_triplets = logs_triplets)
 
         # Forward only...
         with torch.no_grad():
@@ -340,7 +343,7 @@ for epoch in tqdm.tqdm(range(max_epochs)):
 
     # Report the learning rate used in the last optimization...
     lr_used = optimizer.param_groups[0]['lr']
-    logger.info(f"MSG (device:{device}) - epoch {epoch}, lr used = {lr_used}")
+    logger.info(f"MSG (device:{device}) - epoch {epoch} (lr used = {lr_used})")
 
     # Update learning rate in the scheduler...
     scheduler.step(validate_loss_mean)
