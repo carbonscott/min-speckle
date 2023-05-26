@@ -44,8 +44,8 @@ seed = 0
 set_seed(seed)
 
 # [[[ USER INPUT ]]]
-timestamp_prev = None # "2023_0505_1249_26"
-epoch          = None # 21
+timestamp_prev = "2023_0525_2306_33" # "2023_0505_1249_26"
+epoch          = 109 # 21
 
 drc_chkpt = "chkpts"
 fl_chkpt_prev   = None if timestamp_prev is None else f"{timestamp_prev}.epoch_{epoch}.chkpt"
@@ -59,7 +59,7 @@ path_dataset  = os.path.join(drc_dataset, fl_dataset)
 num_sample_per_label_train    = 20
 num_sample_train              = 30000
 num_sample_per_label_validate = 20
-num_sample_validate           = 10000
+num_sample_validate           = 15000
 
 frac_train    = 0.5
 frac_validate = 0.5
@@ -71,7 +71,7 @@ lr           = 10**(-3.0)
 weight_decay = 1e-4
 
 num_gpu     = 1
-size_batch  = 40 * num_gpu
+size_batch  = 20 * num_gpu
 num_workers = 4  * num_gpu    # mutiple of size_sample // size_batch
 
 mpi_batch_size = 20
@@ -120,13 +120,13 @@ data_validate, data_test         = split_dataset(data_val_and_test, frac_validat
 # Set up transformation rules
 num_patch                    = 10
 size_patch                   = 10
-frac_shift_max               = 0.2
+frac_shift_max               = 0.05
 angle_max                    = 360
 crop_center                  = (86, 86)
 crop_window_size             = (48*2, 48*2)
 path_brightness_distribution = "image_distribution_by_photon_count.npy"
 sigma                        = 0.15
-trim_factor_max              = 0.2
+trim_factor_max              = 0.1
 
 trans_list = (
     RandomBrightness(path_brightness_distribution),
@@ -134,9 +134,9 @@ trans_list = (
     GaussianNoise(sigma),
     Crop(crop_center = crop_center, crop_window_size = crop_window_size),
     RandomRotate(angle_max = angle_max, order = 0), 
-    RandomShift(frac_shift_max, frac_shift_max),
     RandomPatch(num_patch = num_patch, size_patch_y = size_patch, size_patch_x = size_patch, var_patch_y = 0.2, var_patch_x = 0.2),
     RandomCenterCropZoom(trim_factor_max),
+    RandomShift(frac_shift_max, frac_shift_max),
     ## Binning(block_size = 4, mask = None),
 )
 
@@ -236,11 +236,18 @@ if mpi_rank == 0:
 
     print(f"Current timestamp: {timestamp}")
 
+    is_init = True
     for epoch in tqdm.tqdm(range(max_epochs)):
         epoch += epoch_min
 
         # Uses mixed precision???
         if uses_mixed_precision: scaler = torch.cuda.amp.GradScaler()
+
+        # Only log the first pass...
+        logs_triplets = False
+        if is_init:
+            logs_triplets = True
+            is_init = False
 
         # ___/ TRAIN \___
         # Turn on training related components in the model...
@@ -268,7 +275,7 @@ if mpi_rank == 0:
                                                           batch_candidates,
                                                           dataset_train.encode_to_label_dict,
                                                           batch_metadata,
-                                                          logs_triplets = False)
+                                                          logs_triplets = logs_triplets)
 
             # Forward, backward and update...
             if uses_mixed_precision:
@@ -334,7 +341,7 @@ if mpi_rank == 0:
                                                           batch_candidates,
                                                           dataset_train.encode_to_label_dict,
                                                           batch_metadata,
-                                                          logs_triplets = False)
+                                                          logs_triplets = logs_triplets)
 
             # Forward only...
             with torch.no_grad():
