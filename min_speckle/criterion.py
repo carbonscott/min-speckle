@@ -42,10 +42,10 @@ class TripletLoss(nn.Module):
 
         """
         embdiff_pa = emb_p - emb_a
-        dist_pa = torch.sum(embdiff_pa, dim = -1)
+        dist_pa = torch.sum(embdiff_pa * embdiff_pa, dim = -1)
 
         embdiff_na = emb_n - emb_a
-        dist_na = torch.sum(embdiff_na, dim = -1)
+        dist_na = torch.sum(embdiff_na * embdiff_na, dim = -1)
 
         loss = torch.relu(dist_pa - dist_na + self.alpha)
 
