@@ -4,6 +4,9 @@ import torch
 
 from torch.utils.data import Dataset
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TripletCandidate(Dataset):
     """
